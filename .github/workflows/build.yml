@@ -73,9 +73,15 @@ jobs:
         # peer conflict (eslint-watch wants eslint <9, but eslint@9 is also
         # a devDep). npm ci validates peer deps across the FULL lockfile
         # even with --omit=dev, so we need this to get past the validation
-        # step. Only devDeps are affected; the installed prod-dep tree is
-        # unchanged.
-        run: npm ci --omit=dev --omit=optional --ignore-scripts --legacy-peer-deps
+        # step.
+        #
+        # Note: do NOT add --omit=optional. esbuild ships its platform-
+        # specific binary as an optionalDependency (`@esbuild/win32-x64`).
+        # Skipping optionals breaks tsx's TS transform at runtime with
+        # "The package '@esbuild/win32-x64' could not be found" because
+        # npm respects `os`/`cpu` filters anyway — macOS-only optionals
+        # like fsevents don't install on Windows even without the flag.
+        run: npm ci --omit=dev --ignore-scripts --legacy-peer-deps
 
       - name: Run electron-builder
         # The tarball ships with dist/studio-electron + dist/studio-client +
