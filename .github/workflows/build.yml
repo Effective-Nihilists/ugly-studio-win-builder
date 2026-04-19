@@ -114,10 +114,15 @@ jobs:
         shell: pwsh
         working-directory: source
         run: |
-          $exe = "release\win-unpacked\Ugly Studio.exe"
-          $tsx = "release\win-unpacked\resources\app.asar.unpacked\node_modules\tsx\dist\cli.mjs"
-          $boot = "release\win-unpacked\resources\app.asar\studio\server\bootstrap.ts"
-          $cwd = "release\win-unpacked\resources\app.asar.unpacked"
+          # Resolve to absolute paths: the Electron exec below changes its
+          # working directory, so relative paths get doubled.
+          $root = (Get-Location).Path
+          $exe  = Join-Path $root "release\win-unpacked\Ugly Studio.exe"
+          $tsx  = Join-Path $root "release\win-unpacked\resources\app.asar.unpacked\node_modules\tsx\dist\cli.mjs"
+          $boot = Join-Path $root "release\win-unpacked\resources\app.asar\studio\server\bootstrap.ts"
+          $cwd  = Join-Path $root "release\win-unpacked\resources\app.asar.unpacked"
+          # The bootstrap path lives inside app.asar (not a real directory);
+          # Test-Path doesn't see it — skip and let Electron's asar shim read it.
           foreach ($p in @($exe, $tsx, $cwd)) {
             if (-not (Test-Path $p)) { Write-Error "[smoke] missing: $p"; exit 1 }
           }
