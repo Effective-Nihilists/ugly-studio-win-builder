@@ -62,11 +62,14 @@ jobs:
         # electron-builder needs node_modules on disk to scan + include
         # production deps. The tarball intentionally excludes node_modules
         # (too big to ship), so we resolve from package-lock.json here.
-        # --ignore-scripts skips gl's broken nan-shim postinstall; --omit=optional
-        # keeps optional platform-specific binaries off the Windows runner.
+        # --omit=dev skips all devDeps (only prod deps land in the .exe
+        # anyway, and main-app's devDep tree has an eslint peer conflict
+        # that blocks npm ci). --omit=optional keeps optional
+        # platform-specific binaries off the Windows runner. --ignore-scripts
+        # skips gl's broken nan-shim postinstall.
         shell: pwsh
         working-directory: source
-        run: npm ci --ignore-scripts --omit=optional
+        run: npm ci --omit=dev --omit=optional --ignore-scripts
 
       - name: Run electron-builder
         # The tarball ships with dist/studio-electron + dist/studio-client +
