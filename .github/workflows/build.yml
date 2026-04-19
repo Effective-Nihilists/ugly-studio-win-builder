@@ -69,7 +69,13 @@ jobs:
         # skips gl's broken nan-shim postinstall.
         shell: pwsh
         working-directory: source
-        run: npm ci --omit=dev --omit=optional --ignore-scripts
+        # --legacy-peer-deps because main-app's devDep tree has an eslint
+        # peer conflict (eslint-watch wants eslint <9, but eslint@9 is also
+        # a devDep). npm ci validates peer deps across the FULL lockfile
+        # even with --omit=dev, so we need this to get past the validation
+        # step. Only devDeps are affected; the installed prod-dep tree is
+        # unchanged.
+        run: npm ci --omit=dev --omit=optional --ignore-scripts --legacy-peer-deps
 
       - name: Run electron-builder
         # The tarball ships with dist/studio-electron + dist/studio-client +
