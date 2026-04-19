@@ -103,6 +103,59 @@ jobs:
         run: |
           Get-ChildItem release -Recurse -File | Select-Object FullName,Length | Format-Table
 
+      - name: Smoke test packaged sidecar
+        # Spawns the exact sidecar process the installed app would, using
+        # the unpacked bundle electron-builder leaves at release/win-unpacked/.
+        # Waits for the `config.load ok` milestone (proves tsx preflight +
+        # ESM module resolution across app.asar worked) or fails with the
+        # recent log tail. Catches TLA regressions, missing transitive deps
+        # (get-tsconfig, @esbuild/win32-x64), and asar-resolution breakage
+        # before we publish a broken .exe.
+        shell: pwsh
+        working-directory: source
+        run: |
+          $exe = "release\win-unpacked\Ugly Studio.exe"
+          $tsx = "release\win-unpacked\resources\app.asar.unpacked\node_modules\tsx\dist\cli.mjs"
+          $boot = "release\win-unpacked\resources\app.asar\studio\server\bootstrap.ts"
+          $cwd = "release\win-unpacked\resources\app.asar.unpacked"
+          foreach ($p in @($exe, $tsx, $cwd)) {
+            if (-not (Test-Path $p)) { Write-Error "[smoke] missing: $p"; exit 1 }
+          }
+          $env:ELECTRON_RUN_AS_NODE = "1"
+          $env:PORT = "0"
+          $logFile = [IO.Path]::GetTempFileName()
+          $proc = Start-Process -FilePath $exe -ArgumentList @($tsx, $boot) `
+                                -WorkingDirectory $cwd `
+                                -RedirectStandardOutput $logFile `
+                                -RedirectStandardError "$logFile.err" `
+                                -NoNewWindow -PassThru
+          $deadline = (Get-Date).AddSeconds(30)
+          $ok = $false
+          $fail = $false
+          while ((Get-Date) -lt $deadline) {
+            Start-Sleep -Milliseconds 500
+            $out = (Get-Content $logFile -ErrorAction SilentlyContinue) -join "`n"
+            $err = (Get-Content "$logFile.err" -ErrorAction SilentlyContinue) -join "`n"
+            $combined = "$out`n$err"
+            if ($combined -match "MODULE_NOT_FOUND|ERR_MODULE_NOT_FOUND|Cannot find module|Cannot find package|Transform failed") {
+              $fail = $true; break
+            }
+            if ($combined -match "config\.load ok") { $ok = $true; break }
+            if ($proc.HasExited -and -not $ok) { $fail = $true; break }
+          }
+          if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue }
+          $stdout = Get-Content $logFile -Raw -ErrorAction SilentlyContinue
+          $stderr = Get-Content "$logFile.err" -Raw -ErrorAction SilentlyContinue
+          Write-Host "=== stdout (last 40 lines) ==="
+          if ($stdout) { ($stdout -split "`n") | Select-Object -Last 40 | ForEach-Object { Write-Host $_ } }
+          Write-Host "=== stderr (last 40 lines) ==="
+          if ($stderr) { ($stderr -split "`n") | Select-Object -Last 40 | ForEach-Object { Write-Host $_ } }
+          if ($fail -or -not $ok) {
+            Write-Error "[smoke] FAIL — sidecar did not reach config.load"
+            exit 1
+          }
+          Write-Host "[smoke] OK — sidecar reached config.load"
+
       - name: Create GitHub Release with installer
         # Tag = win-v<version>. If a release already exists (re-run), the
         # action updates it instead of failing.
