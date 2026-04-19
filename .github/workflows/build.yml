@@ -1,0 +1,102 @@
+name: Build Windows Installer
+
+on:
+  workflow_dispatch:
+    inputs:
+      tarball_url:
+        description: 'R2 presigned URL for encrypted source tarball (15 min TTL)'
+        required: true
+      version:
+        description: 'Version string (must match the version in the tarballed package.json)'
+        required: true
+
+# Gives the workflow token permission to create a release.
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout this repo (workflow + decrypt script)
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.x'
+
+      - name: Download encrypted tarball
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "${{ inputs.tarball_url }}" -OutFile tarball.tar.gz.enc
+          $size = (Get-Item tarball.tar.gz.enc).Length
+          Write-Host "Downloaded $size bytes"
+
+      - name: Decrypt
+        shell: pwsh
+        env:
+          WIN_BUILD_ENCRYPTION_KEY: ${{ secrets.WIN_BUILD_ENCRYPTION_KEY }}
+        run: node scripts/decrypt.mjs tarball.tar.gz.enc tarball.tar.gz
+
+      - name: Extract
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path source | Out-Null
+          tar -xzf tarball.tar.gz -C source
+          Get-ChildItem source | Format-Table -AutoSize
+
+      - name: Verify version matches input
+        shell: pwsh
+        run: |
+          $pkg = Get-Content source/package.json -Raw | ConvertFrom-Json
+          if ($pkg.version -ne "${{ inputs.version }}") {
+            Write-Error "Tarball package.json version ($($pkg.version)) does not match input (${{ inputs.version }})"
+            exit 1
+          }
+          Write-Host "Version check OK: $($pkg.version)"
+
+      - name: Run electron-builder
+        # The tarball ships with dist/studio-electron + dist/studio-client +
+        # required node_modules (prod-only, with Windows prebuilds present).
+        # We add --config.npmRebuild=false because the private repo already
+        # handled native-dep resolution — rebuilding would fail anyway since
+        # some deps have no node-gyp build path.
+        shell: pwsh
+        working-directory: source
+        env:
+          # No Windows code-signing cert yet — SmartScreen will warn on
+          # first-launch. Same trade-off as unsigned Mac DMG pre-notarization.
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: npx electron-builder --config studio/electron-builder.json --win --x64 --config.npmRebuild=false
+
+      - name: List build output
+        shell: pwsh
+        working-directory: source
+        run: |
+          Get-ChildItem release -Recurse -File | Select-Object FullName,Length | Format-Table
+
+      - name: Create GitHub Release with installer
+        # Tag = win-v<version>. If a release already exists (re-run), the
+        # action updates it instead of failing.
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: win-v${{ inputs.version }}
+          name: Windows Installer v${{ inputs.version }}
+          body: |
+            Unsigned Windows installer built from encrypted inputs pushed by the
+            ugly-studio private repo. Downloaded, decrypted, and packaged on this
+            runner at ${{ github.run_id }}.
+
+            **This release is an intermediate artifact.** The authoritative
+            distribution is at `https://ugly.bot/studio/releases/`. The private
+            repo's publish pipeline pulls this `.exe` and uploads it to R2 +
+            updates `studio-latest.json`.
+          files: |
+            source/release/*.exe
+            source/release/*.blockmap
+            source/release/latest.yml
+          # Overwrite if tag exists — supports retry runs.
+          fail_on_unmatched_files: true
