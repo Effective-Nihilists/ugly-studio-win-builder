@@ -58,6 +58,16 @@ jobs:
           }
           Write-Host "Version check OK: $($pkg.version)"
 
+      - name: Install deps
+        # electron-builder needs node_modules on disk to scan + include
+        # production deps. The tarball intentionally excludes node_modules
+        # (too big to ship), so we resolve from package-lock.json here.
+        # --ignore-scripts skips gl's broken nan-shim postinstall; --omit=optional
+        # keeps optional platform-specific binaries off the Windows runner.
+        shell: pwsh
+        working-directory: source
+        run: npm ci --ignore-scripts --omit=optional
+
       - name: Run electron-builder
         # The tarball ships with dist/studio-electron + dist/studio-client +
         # required node_modules (prod-only, with Windows prebuilds present).
