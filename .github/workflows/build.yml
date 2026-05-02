@@ -177,6 +177,84 @@ jobs:
         working-directory: source
         run: npx tsx studio/scripts/smoke-packaged-bash-tools.ts
 
+      - name: Smoke test bundled binaries (npx + python + indexer race)
+        # Drives the sidecar through the two regression-prone paths the
+        # config.load smoke can't reach:
+        #   1. `spawn npx ENOENT` on Windows (initProject) — verified by
+        #      [smoke:npx ok] from a `bash -c "npx --version"` via the
+        #      bundled PortableGit bash + bundled Node.
+        #   2. indexer.pythonDetect race (ensureIndexStarted fires from
+        #      the rehydration path before binaries.ensure finishes) —
+        #      we pre-seed `~/.ugly-studio/current-project.json` so the
+        #      bootstrap rehydration triggers the race naturally, then
+        #      assert `indexer.pythonDetect fail` is absent in the log.
+        # The sidecar runs `studio/server/smokeSelfTest.ts` when
+        # UGLY_STUDIO_SMOKE=1 and exits non-zero on probe failure.
+        # First-run cost: ~5min for the python download; we allow 10min.
+        shell: pwsh
+        working-directory: source
+        run: |
+          $root = (Get-Location).Path
+          $exe  = Join-Path $root "release\win-unpacked\Ugly Studio.exe"
+          $tsx  = Join-Path $root "release\win-unpacked\resources\app.asar.unpacked\node_modules\tsx\dist\cli.mjs"
+          $boot = Join-Path $root "release\win-unpacked\resources\app.asar\studio\server\bootstrap.ts"
+          $cwd  = Join-Path $root "release\win-unpacked\resources\app.asar.unpacked"
+
+          # Seed the rehydration marker. `loadCurrentProjectSync()` does
+          # `statSync(marker.path)` and drops the marker if the dir is
+          # gone, so the path has to exist at launch.
+          $markerDir = Join-Path $env:USERPROFILE ".ugly-studio"
+          New-Item -ItemType Directory -Force -Path $markerDir | Out-Null
+          $projDir = Join-Path $env:TEMP ("ugly-studio-smoke-" + [System.Guid]::NewGuid().ToString("N"))
+          New-Item -ItemType Directory -Force -Path $projDir | Out-Null
+          $marker = @{ path = $projDir } | ConvertTo-Json -Compress
+          Set-Content -Path (Join-Path $markerDir "current-project.json") -Value $marker -NoNewline -Encoding utf8
+          Write-Host "[smoke-bin] seeded current-project marker → $projDir"
+
+          $env:ELECTRON_RUN_AS_NODE = "1"
+          $env:PORT = "0"
+          $env:UGLY_STUDIO_SMOKE = "1"
+          $logFile = [IO.Path]::GetTempFileName()
+          $proc = Start-Process -FilePath $exe -ArgumentList @($tsx, $boot) `
+                                -WorkingDirectory $cwd `
+                                -RedirectStandardOutput $logFile `
+                                -RedirectStandardError "$logFile.err" `
+                                -NoNewWindow -PassThru
+
+          # Self-test calls process.exit() after both probes — wait for
+          # natural exit, hard-cap at 10min so a hung sidecar can't pin
+          # the runner.
+          $deadline = (Get-Date).AddMinutes(10)
+          while ((Get-Date) -lt $deadline -and -not $proc.HasExited) {
+            Start-Sleep -Seconds 5
+          }
+          if (-not $proc.HasExited) {
+            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+            Write-Error "[smoke-bin] FAIL — sidecar did not exit within 10 min"
+            exit 1
+          }
+
+          $exitCode = $proc.ExitCode
+          $stdout = Get-Content $logFile -Raw -ErrorAction SilentlyContinue
+          $stderr = Get-Content "$logFile.err" -Raw -ErrorAction SilentlyContinue
+          $combined = "$stdout`n$stderr"
+          Write-Host "=== sidecar stdout (last 80 lines) ==="
+          if ($stdout) { ($stdout -split "`n") | Select-Object -Last 80 | ForEach-Object { Write-Host $_ } }
+          Write-Host "=== sidecar stderr (last 40 lines) ==="
+          if ($stderr) { ($stderr -split "`n") | Select-Object -Last 40 | ForEach-Object { Write-Host $_ } }
+
+          $npxOk    = $combined -match "\[smoke:npx ok\]"
+          $pythonOk = $combined -match "\[smoke:python ok\]"
+          $raceOk   = $combined -match "\[smoke:race ok\]"
+
+          $bad = $false
+          if (-not $npxOk)    { Write-Host "::error::[smoke-bin] bundled npx probe did not pass"; $bad = $true }
+          if (-not $pythonOk) { Write-Host "::error::[smoke-bin] bundled python probe did not pass"; $bad = $true }
+          if (-not $raceOk)   { Write-Host "::error::[smoke-bin] indexer race probe did not pass — readiness-gate regression?"; $bad = $true }
+          if ($exitCode -ne 0) { Write-Host "::error::[smoke-bin] sidecar exited with code $exitCode"; $bad = $true }
+          if ($bad) { exit 1 }
+          Write-Host "[smoke-bin] OK — npx + python + indexer-race probes all passed"
+
       - name: Create GitHub Release with installer
         # Tag = win-v<version>. If a release already exists (re-run), the
         # action updates it instead of failing.
