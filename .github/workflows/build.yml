@@ -161,6 +161,22 @@ jobs:
           }
           Write-Host "[smoke] OK — sidecar reached config.load"
 
+      - name: Smoke test packaged bash tools
+        # Spawns the packaged Electron exec under ELECTRON_RUN_AS_NODE,
+        # awaits ensureBinaries() (downloads git/node/pnpm/uv/python +
+        # ffmpeg/imagemagick/pandoc/pdftotext/jq/yq/sqlite3/yt-dlp/pup
+        # into ~/.ugly-studio/binaries/), then runs each
+        # platform-supported tool through a sealed bash session and
+        # asserts the spec version string appears in stdout. Also runs
+        # `ugly-studio --help`, `pwd`, and `ls /c` to prove the sealed
+        # shell + CLI entry both bootstrap. Catches Windows-specific
+        # regressions the sidecar smoke can't see: MSYS2 bash.exe path
+        # resolution, MAGICK_HOME injection, .exe suffix handling, and
+        # win32-arm64 → x64 fallbacks for uv/python.
+        shell: pwsh
+        working-directory: source
+        run: npx tsx studio/scripts/smoke-packaged-bash-tools.ts
+
       - name: Create GitHub Release with installer
         # Tag = win-v<version>. If a release already exists (re-run), the
         # action updates it instead of failing.
