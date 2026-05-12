@@ -228,20 +228,24 @@ jobs:
           while ((Get-Date) -lt $deadline -and -not $proc.HasExited) {
             Start-Sleep -Seconds 5
           }
+          $timedOut = $false
           if (-not $proc.HasExited) {
             Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
-            Write-Error "[smoke-bin] FAIL — sidecar did not exit within 10 min"
-            exit 1
+            $timedOut = $true
           }
 
-          $exitCode = $proc.ExitCode
+          $exitCode = if ($timedOut) { -1 } else { $proc.ExitCode }
           $stdout = Get-Content $logFile -Raw -ErrorAction SilentlyContinue
           $stderr = Get-Content "$logFile.err" -Raw -ErrorAction SilentlyContinue
           $combined = "$stdout`n$stderr"
-          Write-Host "=== sidecar stdout (last 80 lines) ==="
-          if ($stdout) { ($stdout -split "`n") | Select-Object -Last 80 | ForEach-Object { Write-Host $_ } }
-          Write-Host "=== sidecar stderr (last 40 lines) ==="
-          if ($stderr) { ($stderr -split "`n") | Select-Object -Last 40 | ForEach-Object { Write-Host $_ } }
+          Write-Host "=== sidecar stdout (last 200 lines) ==="
+          if ($stdout) { ($stdout -split "`n") | Select-Object -Last 200 | ForEach-Object { Write-Host $_ } }
+          Write-Host "=== sidecar stderr (last 80 lines) ==="
+          if ($stderr) { ($stderr -split "`n") | Select-Object -Last 80 | ForEach-Object { Write-Host $_ } }
+          if ($timedOut) {
+            Write-Host "::error::[smoke-bin] FAIL — sidecar did not exit within 10 min"
+            exit 1
+          }
 
           $npxOk    = $combined -match "\[smoke:npx ok\]"
           $pythonOk = $combined -match "\[smoke:python ok\]"
