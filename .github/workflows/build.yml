@@ -9,6 +9,10 @@ on:
       version:
         description: 'Version string (must match the version in the tarballed package.json)'
         required: true
+      skip_validation:
+        description: 'When "true", skip the version-match guard + the three packaged smokes. For fast-iteration publishes from main-app only — never use this for a release the public will consume.'
+        required: false
+        default: 'false'
 
 # Gives the workflow token permission to create a release.
 permissions:
@@ -49,6 +53,7 @@ jobs:
           Get-ChildItem source | Format-Table -AutoSize
 
       - name: Verify version matches input
+        if: inputs.skip_validation != 'true'
         shell: pwsh
         run: |
           $pkg = Get-Content source/package.json -Raw | ConvertFrom-Json
@@ -104,6 +109,7 @@ jobs:
           Get-ChildItem release -Recurse -File | Select-Object FullName,Length | Format-Table
 
       - name: Smoke test packaged sidecar
+        if: inputs.skip_validation != 'true'
         # Spawns the exact sidecar process the installed app would, using
         # the unpacked bundle electron-builder leaves at release/win-unpacked/.
         # Waits for the `config.load ok` milestone (proves tsx preflight +
@@ -162,6 +168,7 @@ jobs:
           Write-Host "[smoke] OK — sidecar reached config.load"
 
       - name: Smoke test packaged bash tools
+        if: inputs.skip_validation != 'true'
         # Spawns the packaged Electron exec under ELECTRON_RUN_AS_NODE,
         # awaits ensureBinaries() (downloads git/node/pnpm/uv/python +
         # ffmpeg/imagemagick/pandoc/pdftotext/jq/yq/sqlite3/yt-dlp/pup
@@ -178,6 +185,7 @@ jobs:
         run: npx tsx studio/scripts/smoke-packaged-bash-tools.ts
 
       - name: Smoke test bundled binaries (npx + python + indexer race)
+        if: inputs.skip_validation != 'true'
         # Drives the sidecar through the two regression-prone paths the
         # config.load smoke can't reach:
         #   1. `spawn npx ENOENT` on Windows (initProject) — verified by
