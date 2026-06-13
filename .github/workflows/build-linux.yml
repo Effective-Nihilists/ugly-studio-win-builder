@@ -169,9 +169,11 @@ jobs:
             distribution is at `https://ugly.bot/studio/releases/`. The private
             repo's publish pipeline pulls these artifacts and uploads them to R2
             + updates `studio-latest.json`.
+          # Note: AppImage embeds its block map inline in latest-linux.yml —
+          # there is no standalone *.blockmap file on Linux (unlike Windows
+          # NSIS), so it's intentionally not listed here.
           files: |
             source/release/*.AppImage
             source/release/*.deb
-            source/release/*.blockmap
             source/release/latest-linux.yml
           fail_on_unmatched_files: true
