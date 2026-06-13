@@ -1,0 +1,177 @@
+# ───────────────────────────────────────────────────────────────────────────
+# This file does NOT belong to the main-app repo's CI. It is the source of
+# truth for the Linux builder workflow that must live in the PUBLIC builder
+# repo:
+#
+#     Effective-Nihilists/ugly-studio-win-builder
+#       └─ .github/workflows/build-linux.yml   ← paste this there
+#
+# It mirrors that repo's existing build.yml (Windows) but builds the Linux
+# AppImage + .deb on an ubuntu-latest runner. scripts/linux-release.ts in the
+# main-app repo dispatches it via `gh workflow run build-linux.yml`.
+#
+# Shared secret (already present for Windows): WIN_BUILD_ENCRYPTION_KEY.
+# Reused as-is so no new secret setup is needed.
+# ───────────────────────────────────────────────────────────────────────────
+name: Build Linux Installer
+
+on:
+  workflow_dispatch:
+    inputs:
+      tarball_url:
+        description: 'R2 presigned URL for encrypted source tarball (15 min TTL)'
+        required: true
+      version:
+        description: 'Version string (must match the version in the tarballed package.json)'
+        required: true
+      skip_validation:
+        description: 'When "true", skip the version-match guard + the packaged smoke. For fast-iteration publishes only — never for a public release.'
+        required: false
+        default: 'false'
+
+# Gives the workflow token permission to create a release.
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout this repo (workflow + decrypt script)
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.x'
+
+      - name: Download encrypted tarball
+        run: |
+          curl -fsSL "${{ inputs.tarball_url }}" -o tarball.tar.gz.enc
+          echo "Downloaded $(stat -c%s tarball.tar.gz.enc) bytes"
+
+      - name: Decrypt
+        env:
+          WIN_BUILD_ENCRYPTION_KEY: ${{ secrets.WIN_BUILD_ENCRYPTION_KEY }}
+        run: node scripts/decrypt.mjs tarball.tar.gz.enc tarball.tar.gz
+
+      - name: Extract
+        run: |
+          mkdir -p source
+          tar -xzf tarball.tar.gz -C source
+          ls -la source
+
+      - name: Verify version matches input
+        if: inputs.skip_validation != 'true'
+        working-directory: source
+        run: |
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          if [ "$PKG_VERSION" != "${{ inputs.version }}" ]; then
+            echo "::error::Tarball package.json version ($PKG_VERSION) does not match input (${{ inputs.version }})"
+            exit 1
+          fi
+          echo "Version check OK: $PKG_VERSION"
+
+      - name: Install deps
+        # electron-builder needs node_modules on disk to scan + include
+        # production deps. The tarball intentionally excludes node_modules
+        # (too big to ship), so we resolve from package-lock.json here.
+        #
+        # Flags mirror the Windows builder:
+        #   --omit=dev          only prod deps land in the package; main-app's
+        #                       devDep tree has an eslint peer conflict.
+        #   --ignore-scripts    native deps (bcrypt, node-pty, node-gyp-build)
+        #                       ship/resolve prebuilds via node-gyp-build — no
+        #                       build-from-source step needed; this also skips
+        #                       gl's broken postinstall. The correct linux-x64
+        #                       prebuilds resolve because npm honours os/cpu
+        #                       filters and installs @esbuild/linux-x64 here.
+        #   --legacy-peer-deps  get past npm ci's full-lockfile peer validation.
+        working-directory: source
+        run: npm ci --omit=dev --ignore-scripts --legacy-peer-deps
+
+      - name: Run electron-builder
+        # The tarball ships dist/studio-electron + dist/studio-client. We add
+        # --config.npmRebuild=false because native-dep resolution already
+        # happened in `npm ci` above (linux-x64 prebuilds), matching the
+        # Windows builder. No Linux code-signing — AppImage/.deb ship unsigned.
+        working-directory: source
+        run: npx electron-builder --config studio/electron-builder.json --linux --x64 --config.npmRebuild=false
+
+      - name: List build output
+        working-directory: source
+        run: ls -la release || true
+
+      - name: Smoke test packaged sidecar
+        if: inputs.skip_validation != 'true'
+        # Spawns the exact sidecar process the installed app would, using the
+        # unpacked bundle electron-builder leaves at release/linux-unpacked/.
+        # Runs under ELECTRON_RUN_AS_NODE (plain node — no display needed on the
+        # headless runner) and waits for the `config.load ok` milestone, which
+        # proves tsx preflight + ESM resolution across app.asar worked. Catches
+        # missing transitive deps / asar-resolution breakage before publish.
+        working-directory: source
+        run: |
+          set -uo pipefail
+          ROOT="$(pwd)"
+          UNPACKED="$ROOT/release/linux-unpacked"
+          # Main app binary is named after productName ("Ugly Studio" → ugly-studio).
+          # Fall back to a glob that excludes chrome helpers + shared objects.
+          EXE="$UNPACKED/ugly-studio"
+          if [ ! -x "$EXE" ]; then
+            EXE="$(find "$UNPACKED" -maxdepth 1 -type f -executable \
+                    -not -name 'chrome*' -not -name '*.so*' | head -1)"
+          fi
+          TSX="$UNPACKED/resources/app.asar.unpacked/node_modules/tsx/dist/cli.mjs"
+          BOOT="$UNPACKED/resources/app.asar/studio/server/bootstrap.ts"
+          CWD="$UNPACKED/resources/app.asar.unpacked"
+          for p in "$EXE" "$TSX" "$CWD"; do
+            if [ ! -e "$p" ]; then echo "::error::[smoke] missing: $p"; exit 1; fi
+          done
+          echo "[smoke] exe=$EXE"
+          LOG="$(mktemp)"
+          ( cd "$CWD" && ELECTRON_RUN_AS_NODE=1 PORT=0 "$EXE" "$TSX" "$BOOT" ) \
+            > "$LOG" 2>&1 &
+          PID=$!
+          OK=0; FAIL=0
+          for _ in $(seq 1 60); do
+            sleep 0.5
+            if grep -Eq "MODULE_NOT_FOUND|ERR_MODULE_NOT_FOUND|Cannot find module|Cannot find package|Transform failed" "$LOG"; then
+              FAIL=1; break
+            fi
+            if grep -q "config.load ok" "$LOG"; then OK=1; break; fi
+            if ! kill -0 "$PID" 2>/dev/null && [ "$OK" -eq 0 ]; then FAIL=1; break; fi
+          done
+          kill "$PID" 2>/dev/null || true
+          echo "=== sidecar log (last 40 lines) ==="
+          tail -n 40 "$LOG" || true
+          if [ "$FAIL" -eq 1 ] || [ "$OK" -eq 0 ]; then
+            echo "::error::[smoke] FAIL — sidecar did not reach config.load"
+            exit 1
+          fi
+          echo "[smoke] OK — sidecar reached config.load"
+
+      - name: Create GitHub Release with installers
+        # Tag = linux-v<version>. If a release already exists (re-run), the
+        # action updates it instead of failing.
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: linux-v${{ inputs.version }}
+          name: Linux Installer v${{ inputs.version }}
+          body: |
+            Unsigned Linux AppImage + .deb built from encrypted inputs pushed by
+            the ugly-studio private repo. Downloaded, decrypted, and packaged on
+            this runner at ${{ github.run_id }}.
+
+            **This release is an intermediate artifact.** The authoritative
+            distribution is at `https://ugly.bot/studio/releases/`. The private
+            repo's publish pipeline pulls these artifacts and uploads them to R2
+            + updates `studio-latest.json`.
+          files: |
+            source/release/*.AppImage
+            source/release/*.deb
+            source/release/*.blockmap
+            source/release/latest-linux.yml
+          fail_on_unmatched_files: true
