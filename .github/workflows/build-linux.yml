@@ -153,6 +153,83 @@ jobs:
           fi
           echo "[smoke] OK — sidecar reached config.load"
 
+      - name: Smoke test packaged bash tools
+        if: inputs.skip_validation != 'true'
+        # Drives the packaged Electron under ELECTRON_RUN_AS_NODE, awaits
+        # ensureBinaries() (downloads node/git/uv/python/pnpm + ffmpeg/pandoc/
+        # pdftotext/jq/yq/yt-dlp/pup into ~/.ugly-studio/binaries/ from R2),
+        # then runs each linux-supported tool through a sealed bash session and
+        # asserts the expected version string. Catches linux-x64 binary-resolution
+        # regressions the sidecar boot smoke can't see (missing prebuilds, sealed
+        # PATH, chmod). imagemagick has no linux upstream → its probe self-skips.
+        working-directory: source
+        run: npx tsx studio/scripts/smoke-packaged-bash-tools.ts
+
+      - name: Smoke test bundled binaries (npx + python + indexer race)
+        if: inputs.skip_validation != 'true'
+        # Drives the sidecar through the two regression-prone provisioning paths
+        # the config.load smoke can't reach: (1) `bash -c "npx --version"` via
+        # bundled bash + bundled Node, (2) the indexer.pythonDetect race — we
+        # pre-seed ~/.ugly-studio/current-project.json so bootstrap rehydration
+        # triggers ensureIndexStarted before binaries.ensure finishes. The
+        # sidecar runs studio/server/smokeSelfTest.ts when UGLY_STUDIO_SMOKE=1
+        # and process.exit(0)s only when all three probes pass. First-run python
+        # download dominates; allow 10 min.
+        working-directory: source
+        run: |
+          set -uo pipefail
+          ROOT="$(pwd)"
+          UNPACKED="$ROOT/release/linux-unpacked"
+          EXE="$UNPACKED/ugly-studio"
+          if [ ! -x "$EXE" ]; then
+            EXE="$(find "$UNPACKED" -maxdepth 1 -type f -executable \
+                    -not -name 'chrome*' -not -name '*.so*' | head -1)"
+          fi
+          TSX="$UNPACKED/resources/app.asar.unpacked/node_modules/tsx/dist/cli.mjs"
+          BOOT="$UNPACKED/resources/app.asar/studio/server/bootstrap.ts"
+          CWD="$UNPACKED/resources/app.asar.unpacked"
+
+          # Seed the rehydration marker so the bootstrap path races the indexer
+          # against binaries.ensure (the regression this probe guards). loadCurrent
+          # ProjectSync() statSyncs marker.path and drops it if the dir is gone, so
+          # the project dir must exist at launch.
+          MARKER_DIR="$HOME/.ugly-studio"
+          mkdir -p "$MARKER_DIR"
+          PROJ_DIR="$(mktemp -d -t ugly-studio-smoke-XXXXXX)"
+          printf '{"path":"%s"}' "$PROJ_DIR" > "$MARKER_DIR/current-project.json"
+          echo "[smoke-bin] seeded current-project marker → $PROJ_DIR"
+
+          LOG="$(mktemp)"
+          ( cd "$CWD" && ELECTRON_RUN_AS_NODE=1 PORT=0 UGLY_STUDIO_SMOKE=1 \
+              "$EXE" "$TSX" "$BOOT" ) > "$LOG" 2>&1 &
+          PID=$!
+          # Self-test process.exit()s after the probes — wait for natural exit,
+          # hard-cap at 10 min so a hung sidecar can't pin the runner.
+          TIMED_OUT=1
+          for _ in $(seq 1 120); do
+            sleep 5
+            if ! kill -0 "$PID" 2>/dev/null; then TIMED_OUT=0; break; fi
+          done
+          EXIT_CODE=1
+          if [ "$TIMED_OUT" -eq 1 ]; then
+            kill "$PID" 2>/dev/null || true
+          else
+            wait "$PID"; EXIT_CODE=$?
+          fi
+          echo "=== sidecar log (last 200 lines) ==="
+          tail -n 200 "$LOG" || true
+          if [ "$TIMED_OUT" -eq 1 ]; then
+            echo "::error::[smoke-bin] FAIL — sidecar did not exit within 10 min"
+            exit 1
+          fi
+          BAD=0
+          grep -q "\[smoke:npx ok\]"    "$LOG" || { echo "::error::[smoke-bin] bundled npx probe did not pass"; BAD=1; }
+          grep -q "\[smoke:python ok\]" "$LOG" || { echo "::error::[smoke-bin] bundled python probe did not pass"; BAD=1; }
+          grep -q "\[smoke:race ok\]"   "$LOG" || { echo "::error::[smoke-bin] indexer race probe did not pass — readiness-gate regression?"; BAD=1; }
+          [ "$EXIT_CODE" -eq 0 ] || { echo "::error::[smoke-bin] sidecar exited with code $EXIT_CODE"; BAD=1; }
+          [ "$BAD" -eq 0 ] || exit 1
+          echo "[smoke-bin] OK — npx + python + indexer-race probes all passed"
+
       - name: Create GitHub Release with installers
         # Tag = linux-v<version>. If a release already exists (re-run), the
         # action updates it instead of failing.
