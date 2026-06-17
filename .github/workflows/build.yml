@@ -100,7 +100,7 @@ jobs:
           # No Windows code-signing cert yet — SmartScreen will warn on
           # first-launch. Same trade-off as unsigned Mac DMG pre-notarization.
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
-        run: npx electron-builder --config studio/electron-builder.json --win --x64 --config.npmRebuild=false
+        run: npx electron-builder --config electron-builder.json --win --x64 --config.npmRebuild=false
 
       - name: List build output
         shell: pwsh
@@ -182,7 +182,7 @@ jobs:
         # win32-arm64 → x64 fallbacks for uv/python.
         shell: pwsh
         working-directory: source
-        run: npx tsx studio/scripts/smoke-packaged-bash-tools.ts
+        run: npx tsx scripts/smoke-packaged-bash-tools.ts
 
       - name: Smoke test bundled binaries (npx + python + indexer race)
         if: inputs.skip_validation != 'true'

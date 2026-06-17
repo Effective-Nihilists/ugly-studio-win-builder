@@ -98,7 +98,7 @@ jobs:
         # happened in `npm ci` above (linux-x64 prebuilds), matching the
         # Windows builder. No Linux code-signing — AppImage/.deb ship unsigned.
         working-directory: source
-        run: npx electron-builder --config studio/electron-builder.json --linux --x64 --config.npmRebuild=false
+        run: npx electron-builder --config electron-builder.json --linux --x64 --config.npmRebuild=false
 
       - name: List build output
         working-directory: source
@@ -163,7 +163,7 @@ jobs:
         # regressions the sidecar boot smoke can't see (missing prebuilds, sealed
         # PATH, chmod). imagemagick has no linux upstream → its probe self-skips.
         working-directory: source
-        run: npx tsx studio/scripts/smoke-packaged-bash-tools.ts
+        run: npx tsx scripts/smoke-packaged-bash-tools.ts
 
       - name: Smoke test bundled binaries (npx + python + indexer race)
         if: inputs.skip_validation != 'true'
