@@ -90,7 +90,10 @@ jobs:
         #                       filters and installs @esbuild/linux-x64 here.
         #   --legacy-peer-deps  get past npm ci's full-lockfile peer validation.
         working-directory: source
-        run: npm ci --omit=dev --ignore-scripts --legacy-peer-deps
+        run: |
+          corepack enable
+          corepack prepare pnpm@9.1.2 --activate
+          pnpm install --frozen-lockfile --ignore-scripts
 
       - name: Run electron-builder
         # The tarball ships dist/studio-electron + dist/studio-client. We add
@@ -98,7 +101,7 @@ jobs:
         # happened in `npm ci` above (linux-x64 prebuilds), matching the
         # Windows builder. No Linux code-signing — AppImage/.deb ship unsigned.
         working-directory: source
-        run: npx electron-builder --config electron-builder.json --linux --x64 --config.npmRebuild=false
+        run: pnpm exec electron-builder --config electron-builder.json --linux --x64 --config.npmRebuild=false
 
       - name: List build output
         working-directory: source
@@ -125,7 +128,7 @@ jobs:
                     -not -name 'chrome*' -not -name '*.so*' | head -1)"
           fi
           TSX="$UNPACKED/resources/app.asar.unpacked/node_modules/tsx/dist/cli.mjs"
-          BOOT="$UNPACKED/resources/app.asar/studio/server/bootstrap.ts"
+          BOOT="$UNPACKED/resources/app.asar/server/bootstrap.ts"
           CWD="$UNPACKED/resources/app.asar.unpacked"
           for p in "$EXE" "$TSX" "$CWD"; do
             if [ ! -e "$p" ]; then echo "::error::[smoke] missing: $p"; exit 1; fi
@@ -163,7 +166,7 @@ jobs:
         # regressions the sidecar boot smoke can't see (missing prebuilds, sealed
         # PATH, chmod). imagemagick has no linux upstream → its probe self-skips.
         working-directory: source
-        run: npx tsx scripts/smoke-packaged-bash-tools.ts
+        run: pnpm exec tsx scripts/smoke-packaged-bash-tools.ts
 
       - name: Smoke test bundled binaries (npx + python + indexer race)
         if: inputs.skip_validation != 'true'
@@ -186,7 +189,7 @@ jobs:
                     -not -name 'chrome*' -not -name '*.so*' | head -1)"
           fi
           TSX="$UNPACKED/resources/app.asar.unpacked/node_modules/tsx/dist/cli.mjs"
-          BOOT="$UNPACKED/resources/app.asar/studio/server/bootstrap.ts"
+          BOOT="$UNPACKED/resources/app.asar/server/bootstrap.ts"
           CWD="$UNPACKED/resources/app.asar.unpacked"
 
           # Seed the rehydration marker so the bootstrap path races the indexer

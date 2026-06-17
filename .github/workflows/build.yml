@@ -64,34 +64,25 @@ jobs:
           Write-Host "Version check OK: $($pkg.version)"
 
       - name: Install deps
-        # electron-builder needs node_modules on disk to scan + include
-        # production deps. The tarball intentionally excludes node_modules
-        # (too big to ship), so we resolve from package-lock.json here.
-        # --omit=dev skips all devDeps (only prod deps land in the .exe
-        # anyway, and main-app's devDep tree has an eslint peer conflict
-        # that blocks npm ci). --omit=optional keeps optional
-        # platform-specific binaries off the Windows runner. --ignore-scripts
-        # skips gl's broken nan-shim postinstall.
+        # ugly-studio is a pnpm project (pnpm-lock.yaml + .npmrc with
+        # node-linker=hoisted, both shipped in the tarball). We install the
+        # FULL tree (incl. devDeps) so `pnpm exec electron-builder` is
+        # available — unlike `npx`, `pnpm exec` won't auto-fetch it. pnpm
+        # tolerates the eslint peer conflict that blocked `npm ci`, so no
+        # --legacy-peer-deps is needed. --ignore-scripts skips gl's broken
+        # nan-shim postinstall + Playwright's browser download. esbuild's
+        # @esbuild/win32-x64 optional installs because npm/pnpm honor os/cpu
+        # filters. electron-builder still packs only prod deps into the .exe.
         shell: pwsh
         working-directory: source
-        # --legacy-peer-deps because main-app's devDep tree has an eslint
-        # peer conflict (eslint-watch wants eslint <9, but eslint@9 is also
-        # a devDep). npm ci validates peer deps across the FULL lockfile
-        # even with --omit=dev, so we need this to get past the validation
-        # step.
-        #
-        # Note: do NOT add --omit=optional. esbuild ships its platform-
-        # specific binary as an optionalDependency (`@esbuild/win32-x64`).
-        # Skipping optionals breaks tsx's TS transform at runtime with
-        # "The package '@esbuild/win32-x64' could not be found" because
-        # npm respects `os`/`cpu` filters anyway — macOS-only optionals
-        # like fsevents don't install on Windows even without the flag.
-        run: npm ci --omit=dev --ignore-scripts --legacy-peer-deps
+        run: |
+          corepack enable
+          corepack prepare pnpm@9.1.2 --activate
+          pnpm install --frozen-lockfile --ignore-scripts
 
       - name: Run electron-builder
-        # The tarball ships with dist/studio-electron + dist/studio-client +
-        # required node_modules (prod-only, with Windows prebuilds present).
-        # We add --config.npmRebuild=false because the private repo already
+        # dist/studio-electron + dist/studio-client are pre-built in the
+        # tarball. --config.npmRebuild=false because the private repo already
         # handled native-dep resolution — rebuilding would fail anyway since
         # some deps have no node-gyp build path.
         shell: pwsh
@@ -100,7 +91,7 @@ jobs:
           # No Windows code-signing cert yet — SmartScreen will warn on
           # first-launch. Same trade-off as unsigned Mac DMG pre-notarization.
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
-        run: npx electron-builder --config electron-builder.json --win --x64 --config.npmRebuild=false
+        run: pnpm exec electron-builder --config electron-builder.json --win --x64 --config.npmRebuild=false
 
       - name: List build output
         shell: pwsh
@@ -125,7 +116,7 @@ jobs:
           $root = (Get-Location).Path
           $exe  = Join-Path $root "release\win-unpacked\Ugly Studio.exe"
           $tsx  = Join-Path $root "release\win-unpacked\resources\app.asar.unpacked\node_modules\tsx\dist\cli.mjs"
-          $boot = Join-Path $root "release\win-unpacked\resources\app.asar\studio\server\bootstrap.ts"
+          $boot = Join-Path $root "release\win-unpacked\resources\app.asar\server\bootstrap.ts"
           $cwd  = Join-Path $root "release\win-unpacked\resources\app.asar.unpacked"
           # The bootstrap path lives inside app.asar (not a real directory);
           # Test-Path doesn't see it — skip and let Electron's asar shim read it.
@@ -182,7 +173,7 @@ jobs:
         # win32-arm64 → x64 fallbacks for uv/python.
         shell: pwsh
         working-directory: source
-        run: npx tsx scripts/smoke-packaged-bash-tools.ts
+        run: pnpm exec tsx scripts/smoke-packaged-bash-tools.ts
 
       - name: Smoke test bundled binaries (npx + python + indexer race)
         if: inputs.skip_validation != 'true'
@@ -205,7 +196,7 @@ jobs:
           $root = (Get-Location).Path
           $exe  = Join-Path $root "release\win-unpacked\Ugly Studio.exe"
           $tsx  = Join-Path $root "release\win-unpacked\resources\app.asar.unpacked\node_modules\tsx\dist\cli.mjs"
-          $boot = Join-Path $root "release\win-unpacked\resources\app.asar\studio\server\bootstrap.ts"
+          $boot = Join-Path $root "release\win-unpacked\resources\app.asar\server\bootstrap.ts"
           $cwd  = Join-Path $root "release\win-unpacked\resources\app.asar.unpacked"
 
           # Seed the rehydration marker. `loadCurrentProjectSync()` does
