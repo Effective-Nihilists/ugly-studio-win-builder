@@ -161,7 +161,6 @@ jobs:
           Write-Host "[smoke] OK — sidecar reached 'Server running'"
 
       - name: Smoke test packaged bash tools
-        continue-on-error: true
         if: inputs.skip_validation != 'true'
         # Spawns the packaged Electron exec under ELECTRON_RUN_AS_NODE,
         # awaits ensureBinaries() (downloads git/node/pnpm/uv/python +
@@ -179,7 +178,6 @@ jobs:
         run: pnpm exec tsx scripts/smoke-packaged-bash-tools.ts
 
       - name: Smoke test bundled binaries (npx + python + indexer race)
-        continue-on-error: true
         if: inputs.skip_validation != 'true'
         # Drives the sidecar through the two regression-prone paths the
         # config.load smoke can't reach:
