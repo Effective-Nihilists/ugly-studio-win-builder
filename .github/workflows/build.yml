@@ -105,7 +105,7 @@ jobs:
         if: inputs.skip_validation != 'true'
         # Spawns the exact sidecar process the installed app would, using
         # the unpacked bundle electron-builder leaves at release/win-unpacked/.
-        # Waits for the `config.load ok` milestone (proves tsx preflight +
+        # Waits for the `Server running` milestone (proves tsx preflight +
         # ESM module resolution across app.asar worked) or fails with the
         # recent log tail. Catches TLA regressions, missing transitive deps
         # (get-tsconfig, @esbuild/win32-x64), and asar-resolution breakage
@@ -133,7 +133,7 @@ jobs:
                                 -RedirectStandardOutput $logFile `
                                 -RedirectStandardError "$logFile.err" `
                                 -NoNewWindow -PassThru
-          $deadline = (Get-Date).AddSeconds(30)
+          $deadline = (Get-Date).AddSeconds(90)
           $ok = $false
           $fail = $false
           while ((Get-Date) -lt $deadline) {
@@ -141,10 +141,10 @@ jobs:
             $out = (Get-Content $logFile -ErrorAction SilentlyContinue) -join "`n"
             $err = (Get-Content "$logFile.err" -ErrorAction SilentlyContinue) -join "`n"
             $combined = "$out`n$err"
-            if ($combined -match "MODULE_NOT_FOUND|ERR_MODULE_NOT_FOUND|Cannot find module|Cannot find package|Transform failed") {
+            if ($combined -match "MODULE_NOT_FOUND|ERR_MODULE_NOT_FOUND|Cannot find module|Cannot find package|Transform failed|does not provide an export") {
               $fail = $true; break
             }
-            if ($combined -match "config\.load ok") { $ok = $true; break }
+            if ($combined -match "Server running") { $ok = $true; break }
             if ($proc.HasExited -and -not $ok) { $fail = $true; break }
           }
           if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue }
@@ -155,10 +155,10 @@ jobs:
           Write-Host "=== stderr (last 40 lines) ==="
           if ($stderr) { ($stderr -split "`n") | Select-Object -Last 40 | ForEach-Object { Write-Host $_ } }
           if ($fail -or -not $ok) {
-            Write-Error "[smoke] FAIL — sidecar did not reach config.load"
+            Write-Error "[smoke] FAIL — sidecar did not reach 'Server running' (server.start)"
             exit 1
           }
-          Write-Host "[smoke] OK — sidecar reached config.load"
+          Write-Host "[smoke] OK — sidecar reached 'Server running'"
 
       - name: Smoke test packaged bash tools
         if: inputs.skip_validation != 'true'

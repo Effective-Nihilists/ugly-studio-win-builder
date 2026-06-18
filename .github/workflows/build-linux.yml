@@ -114,7 +114,7 @@ jobs:
         # Spawns the exact sidecar process the installed app would, using the
         # unpacked bundle electron-builder leaves at release/linux-unpacked/.
         # Runs under ELECTRON_RUN_AS_NODE (plain node — no display needed on the
-        # headless runner) and waits for the `config.load ok` milestone, which
+        # headless runner) and waits for the `Server running` milestone, which
         # proves tsx preflight + ESM resolution across app.asar worked. Catches
         # missing transitive deps / asar-resolution breakage before publish.
         working-directory: source
@@ -141,22 +141,22 @@ jobs:
             > "$LOG" 2>&1 &
           PID=$!
           OK=0; FAIL=0
-          for _ in $(seq 1 60); do
+          for _ in $(seq 1 180); do
             sleep 0.5
-            if grep -Eq "MODULE_NOT_FOUND|ERR_MODULE_NOT_FOUND|Cannot find module|Cannot find package|Transform failed" "$LOG"; then
+            if grep -Eq "MODULE_NOT_FOUND|ERR_MODULE_NOT_FOUND|Cannot find module|Cannot find package|Transform failed|does not provide an export" "$LOG"; then
               FAIL=1; break
             fi
-            if grep -q "config.load ok" "$LOG"; then OK=1; break; fi
+            if grep -q "Server running" "$LOG"; then OK=1; break; fi
             if ! kill -0 "$PID" 2>/dev/null && [ "$OK" -eq 0 ]; then FAIL=1; break; fi
           done
           kill "$PID" 2>/dev/null || true
           echo "=== sidecar log (last 40 lines) ==="
           tail -n 40 "$LOG" || true
           if [ "$FAIL" -eq 1 ] || [ "$OK" -eq 0 ]; then
-            echo "::error::[smoke] FAIL — sidecar did not reach config.load"
+            echo "::error::[smoke] FAIL — sidecar did not reach 'Server running' (server.start)"
             exit 1
           fi
-          echo "[smoke] OK — sidecar reached config.load"
+          echo "[smoke] OK — sidecar reached 'Server running'"
 
       - name: Smoke test packaged bash tools
         if: inputs.skip_validation != 'true'
