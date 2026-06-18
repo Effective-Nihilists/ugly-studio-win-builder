@@ -47,6 +47,11 @@ jobs:
         with:
           node-version: '22.x'
 
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9.1.2
+
       - name: Download encrypted tarball
         run: |
           curl -fsSL "${{ inputs.tarball_url }}" -o tarball.tar.gz.enc
@@ -90,10 +95,7 @@ jobs:
         #                       filters and installs @esbuild/linux-x64 here.
         #   --legacy-peer-deps  get past npm ci's full-lockfile peer validation.
         working-directory: source
-        run: |
-          corepack enable
-          corepack prepare pnpm@9.1.2 --activate
-          pnpm install --frozen-lockfile --ignore-scripts
+        run: pnpm install --frozen-lockfile --ignore-scripts
 
       - name: Run electron-builder
         # The tarball ships dist/studio-electron + dist/studio-client. We add

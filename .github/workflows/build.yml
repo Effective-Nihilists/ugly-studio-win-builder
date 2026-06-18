@@ -32,6 +32,11 @@ jobs:
         with:
           node-version: '22.x'
 
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9.1.2
+
       - name: Download encrypted tarball
         shell: pwsh
         run: |
@@ -75,10 +80,7 @@ jobs:
         # filters. electron-builder still packs only prod deps into the .exe.
         shell: pwsh
         working-directory: source
-        run: |
-          corepack enable
-          corepack prepare pnpm@9.1.2 --activate
-          pnpm install --frozen-lockfile --ignore-scripts
+        run: pnpm install --frozen-lockfile --ignore-scripts
 
       - name: Run electron-builder
         # dist/studio-electron + dist/studio-client are pre-built in the
