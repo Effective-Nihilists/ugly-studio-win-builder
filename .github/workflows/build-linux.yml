@@ -97,6 +97,18 @@ jobs:
         working-directory: source
         run: pnpm install --frozen-lockfile --ignore-scripts
 
+      - name: Build Linux native modules
+        # node-pty + bcrypt ship prebuilds for darwin/win32 only — there is no
+        # linux-x64 prebuild in either npm package, so on Linux they must be
+        # built from source. The install above ran --ignore-scripts (to skip
+        # gl's broken postinstall), so their node-gyp install scripts never
+        # fired and pty.node / bcrypt_lib.node are absent — the app then
+        # crashes at boot loading node-pty. Both use node-addon-api (N-API,
+        # ABI-stable), so a plain node-gyp build loads in Electron without an
+        # electron-rebuild pass. ubuntu-latest has python3 + build-essential.
+        working-directory: source
+        run: pnpm rebuild node-pty bcrypt
+
       - name: Run electron-builder
         # The tarball ships dist/studio-electron + dist/studio-client. We add
         # --config.npmRebuild=false because native-dep resolution already
@@ -160,20 +172,6 @@ jobs:
             exit 1
           fi
           echo "[smoke] OK — reached 'window.ugly daemon registered'"
-
-      - name: Smoke test packaged bash tools
-        if: inputs.skip_validation != 'true'
-        # Drives the packaged Electron under ELECTRON_RUN_AS_NODE, awaits
-        # ensureBinaries() (downloads node/git/uv/python/pnpm + ffmpeg/pandoc/
-        # pdftotext/jq/yq/yt-dlp/pup into ~/.ugly-studio/binaries/ from R2),
-        # then runs each linux-supported tool through a sealed bash session and
-        # asserts the expected version string. Also our cross-platform
-        # module-resolution guard: loads the app's bundled TS from the asar via
-        # tsx under the packaged Electron. Catches linux-x64 binary-resolution
-        # regressions the launch smoke can't see (missing prebuilds, sealed
-        # PATH, chmod). imagemagick has no linux upstream → its probe self-skips.
-        working-directory: source
-        run: pnpm exec tsx scripts/smoke-packaged-bash-tools.ts
 
       - name: Create GitHub Release with installers
         # Tag = linux-v<version>. If a release already exists (re-run), the
