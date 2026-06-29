@@ -25,7 +25,7 @@ on:
         description: 'Version string (must match the version in the tarballed package.json)'
         required: true
       skip_validation:
-        description: 'When "true", skip the version-match guard + the packaged smoke. For fast-iteration publishes only — never for a public release.'
+        description: 'When "true", skip the version-match guard + the packaged smokes. For fast-iteration publishes only — never for a public release.'
         required: false
         default: 'false'
 
@@ -109,54 +109,57 @@ jobs:
         working-directory: source
         run: ls -la release || true
 
-      - name: Smoke test packaged sidecar
+      - name: Smoke test packaged launch
         if: inputs.skip_validation != 'true'
-        # Spawns the exact sidecar process the installed app would, using the
-        # unpacked bundle electron-builder leaves at release/linux-unpacked/.
-        # Runs under ELECTRON_RUN_AS_NODE (plain node — no display needed on the
-        # headless runner) and waits for the `Server running` milestone, which
-        # proves tsx preflight + ESM resolution across app.asar worked. Catches
-        # missing transitive deps / asar-resolution breakage before publish.
+        # Browser-only app: the legacy backend sidecar (server/bootstrap.ts) is
+        # gone. Launch the packaged binary headless (`--background`: no window,
+        # no login) under xvfb — the runner has no display — and wait for the
+        # `window.ugly daemon registered` milestone, which proves the bundled
+        # Electron main + native daemon resolved across the asar (ESM/asar
+        # module resolution works). `--no-sandbox` because the runner runs as
+        # root, where Electron's setuid sandbox refuses to start. On Linux the
+        # GUI process inherits stdout, so we read the redirected stream
+        # directly (unlike Windows, which needs the on-disk log).
         working-directory: source
         run: |
           set -uo pipefail
           ROOT="$(pwd)"
           UNPACKED="$ROOT/release/linux-unpacked"
-          # Main app binary is named after productName ("Ugly Studio" → ugly-studio).
+          # Main binary is named after productName ("Ugly Studio" → ugly-studio).
           # Fall back to a glob that excludes chrome helpers + shared objects.
           EXE="$UNPACKED/ugly-studio"
           if [ ! -x "$EXE" ]; then
             EXE="$(find "$UNPACKED" -maxdepth 1 -type f -executable \
                     -not -name 'chrome*' -not -name '*.so*' | head -1)"
           fi
-          TSX="$UNPACKED/resources/app.asar.unpacked/node_modules/tsx/dist/cli.mjs"
-          BOOT="$UNPACKED/resources/app.asar/server/bootstrap.ts"
-          CWD="$UNPACKED/resources/app.asar.unpacked"
-          for p in "$EXE" "$TSX" "$CWD"; do
-            if [ ! -e "$p" ]; then echo "::error::[smoke] missing: $p"; exit 1; fi
-          done
+          if [ ! -x "$EXE" ]; then echo "::error::[smoke] missing linux-unpacked binary"; exit 1; fi
           echo "[smoke] exe=$EXE"
+          # xvfb is preinstalled on ubuntu-latest; install defensively in case
+          # the image changes. Non-fatal if the package step can't run.
+          if ! command -v xvfb-run >/dev/null 2>&1; then
+            sudo apt-get update -qq && sudo apt-get install -y -qq xvfb || true
+          fi
           LOG="$(mktemp)"
-          ( cd "$CWD" && ELECTRON_RUN_AS_NODE=1 PORT=0 "$EXE" "$TSX" "$BOOT" ) \
-            > "$LOG" 2>&1 &
+          xvfb-run -a "$EXE" --background --no-sandbox > "$LOG" 2>&1 &
           PID=$!
           OK=0; FAIL=0
           for _ in $(seq 1 180); do
             sleep 0.5
-            if grep -Eq "MODULE_NOT_FOUND|ERR_MODULE_NOT_FOUND|Cannot find module|Cannot find package|Transform failed|does not provide an export" "$LOG"; then
+            if grep -Eq "MODULE_NOT_FOUND|ERR_MODULE_NOT_FOUND|Cannot find module|Cannot find package|Transform failed|does not provide an export|Failed to start:" "$LOG"; then
               FAIL=1; break
             fi
-            if grep -q "Server running" "$LOG"; then OK=1; break; fi
+            if grep -q "window.ugly daemon registered" "$LOG"; then OK=1; break; fi
             if ! kill -0 "$PID" 2>/dev/null && [ "$OK" -eq 0 ]; then FAIL=1; break; fi
           done
           kill "$PID" 2>/dev/null || true
-          echo "=== sidecar log (last 40 lines) ==="
+          pkill -f "ugly-studio" 2>/dev/null || true
+          echo "=== app log (last 40 lines) ==="
           tail -n 40 "$LOG" || true
           if [ "$FAIL" -eq 1 ] || [ "$OK" -eq 0 ]; then
-            echo "::error::[smoke] FAIL — sidecar did not reach 'Server running' (server.start)"
+            echo "::error::[smoke] FAIL — did not reach 'window.ugly daemon registered'"
             exit 1
           fi
-          echo "[smoke] OK — sidecar reached 'Server running'"
+          echo "[smoke] OK — reached 'window.ugly daemon registered'"
 
       - name: Smoke test packaged bash tools
         if: inputs.skip_validation != 'true'
@@ -164,76 +167,13 @@ jobs:
         # ensureBinaries() (downloads node/git/uv/python/pnpm + ffmpeg/pandoc/
         # pdftotext/jq/yq/yt-dlp/pup into ~/.ugly-studio/binaries/ from R2),
         # then runs each linux-supported tool through a sealed bash session and
-        # asserts the expected version string. Catches linux-x64 binary-resolution
-        # regressions the sidecar boot smoke can't see (missing prebuilds, sealed
+        # asserts the expected version string. Also our cross-platform
+        # module-resolution guard: loads the app's bundled TS from the asar via
+        # tsx under the packaged Electron. Catches linux-x64 binary-resolution
+        # regressions the launch smoke can't see (missing prebuilds, sealed
         # PATH, chmod). imagemagick has no linux upstream → its probe self-skips.
         working-directory: source
         run: pnpm exec tsx scripts/smoke-packaged-bash-tools.ts
-
-      - name: Smoke test bundled binaries (npx + python + indexer race)
-        if: inputs.skip_validation != 'true'
-        # Drives the sidecar through the two regression-prone provisioning paths
-        # the config.load smoke can't reach: (1) `bash -c "npx --version"` via
-        # bundled bash + bundled Node, (2) the indexer.pythonDetect race — we
-        # pre-seed ~/.ugly-studio/current-project.json so bootstrap rehydration
-        # triggers ensureIndexStarted before binaries.ensure finishes. The
-        # sidecar runs studio/server/smokeSelfTest.ts when UGLY_STUDIO_SMOKE=1
-        # and process.exit(0)s only when all three probes pass. First-run python
-        # download dominates; allow 10 min.
-        working-directory: source
-        run: |
-          set -uo pipefail
-          ROOT="$(pwd)"
-          UNPACKED="$ROOT/release/linux-unpacked"
-          EXE="$UNPACKED/ugly-studio"
-          if [ ! -x "$EXE" ]; then
-            EXE="$(find "$UNPACKED" -maxdepth 1 -type f -executable \
-                    -not -name 'chrome*' -not -name '*.so*' | head -1)"
-          fi
-          TSX="$UNPACKED/resources/app.asar.unpacked/node_modules/tsx/dist/cli.mjs"
-          BOOT="$UNPACKED/resources/app.asar/server/bootstrap.ts"
-          CWD="$UNPACKED/resources/app.asar.unpacked"
-
-          # Seed the rehydration marker so the bootstrap path races the indexer
-          # against binaries.ensure (the regression this probe guards). loadCurrent
-          # ProjectSync() statSyncs marker.path and drops it if the dir is gone, so
-          # the project dir must exist at launch.
-          MARKER_DIR="$HOME/.ugly-studio"
-          mkdir -p "$MARKER_DIR"
-          PROJ_DIR="$(mktemp -d -t ugly-studio-smoke-XXXXXX)"
-          printf '{"path":"%s"}' "$PROJ_DIR" > "$MARKER_DIR/current-project.json"
-          echo "[smoke-bin] seeded current-project marker → $PROJ_DIR"
-
-          LOG="$(mktemp)"
-          ( cd "$CWD" && ELECTRON_RUN_AS_NODE=1 PORT=0 UGLY_STUDIO_SMOKE=1 \
-              "$EXE" "$TSX" "$BOOT" ) > "$LOG" 2>&1 &
-          PID=$!
-          # Self-test process.exit()s after the probes — wait for natural exit,
-          # hard-cap at 10 min so a hung sidecar can't pin the runner.
-          TIMED_OUT=1
-          for _ in $(seq 1 120); do
-            sleep 5
-            if ! kill -0 "$PID" 2>/dev/null; then TIMED_OUT=0; break; fi
-          done
-          EXIT_CODE=1
-          if [ "$TIMED_OUT" -eq 1 ]; then
-            kill "$PID" 2>/dev/null || true
-          else
-            wait "$PID"; EXIT_CODE=$?
-          fi
-          echo "=== sidecar log (last 200 lines) ==="
-          tail -n 200 "$LOG" || true
-          if [ "$TIMED_OUT" -eq 1 ]; then
-            echo "::error::[smoke-bin] FAIL — sidecar did not exit within 10 min"
-            exit 1
-          fi
-          BAD=0
-          grep -q "\[smoke:npx ok\]"    "$LOG" || { echo "::error::[smoke-bin] bundled npx probe did not pass"; BAD=1; }
-          grep -q "\[smoke:python ok\]" "$LOG" || { echo "::error::[smoke-bin] bundled python probe did not pass"; BAD=1; }
-          grep -q "\[smoke:race ok\]"   "$LOG" || { echo "::error::[smoke-bin] indexer race probe did not pass — readiness-gate regression?"; BAD=1; }
-          [ "$EXIT_CODE" -eq 0 ] || { echo "::error::[smoke-bin] sidecar exited with code $EXIT_CODE"; BAD=1; }
-          [ "$BAD" -eq 0 ] || exit 1
-          echo "[smoke-bin] OK — npx + python + indexer-race probes all passed"
 
       - name: Create GitHub Release with installers
         # Tag = linux-v<version>. If a release already exists (re-run), the

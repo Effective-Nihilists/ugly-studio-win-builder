@@ -10,7 +10,7 @@ on:
         description: 'Version string (must match the version in the tarballed package.json)'
         required: true
       skip_validation:
-        description: 'When "true", skip the version-match guard + the three packaged smokes. For fast-iteration publishes from main-app only — never use this for a release the public will consume.'
+        description: 'When "true", skip the version-match guard + the packaged smokes. For fast-iteration publishes from main-app only — never use this for a release the public will consume.'
         required: false
         default: 'false'
 
@@ -101,64 +101,60 @@ jobs:
         run: |
           Get-ChildItem release -Recurse -File | Select-Object FullName,Length | Format-Table
 
-      - name: Smoke test packaged sidecar
+      - name: Smoke test packaged launch
         if: inputs.skip_validation != 'true'
-        # Spawns the exact sidecar process the installed app would, using
-        # the unpacked bundle electron-builder leaves at release/win-unpacked/.
-        # Waits for the `Server running` milestone (proves tsx preflight +
-        # ESM module resolution across app.asar worked) or fails with the
-        # recent log tail. Catches TLA regressions, missing transitive deps
-        # (get-tsconfig, @esbuild/win32-x64), and asar-resolution breakage
-        # before we publish a broken .exe.
+        # Ugly Studio is now a browser-only app — the legacy backend sidecar
+        # (server/bootstrap.ts) is gone. Launch the packaged .exe headless
+        # (`--background`: no window, no login prompt) and wait for the
+        # `window.ugly daemon registered` milestone. Reaching it proves the
+        # esbuild-bundled Electron main loaded, app.whenReady fired, and the
+        # native window.ugly daemon (node-pty / fs / process capabilities,
+        # lazy-required from the asar) resolved — i.e. ESM/asar module
+        # resolution across the packed bundle works. Catches missing
+        # transitive deps + asar-resolution breakage before we ship a broken
+        # .exe. We read the app's on-disk log (not stdout) because a GUI
+        # Electron process on Windows does not attach console stdout; the log
+        # filename is UTC-date-derived, so we glob the newest electron-*.log.
         shell: pwsh
         working-directory: source
         run: |
-          # Resolve to absolute paths: the Electron exec below changes its
-          # working directory, so relative paths get doubled.
           $root = (Get-Location).Path
           $exe  = Join-Path $root "release\win-unpacked\Ugly Studio.exe"
-          $tsx  = Join-Path $root "release\win-unpacked\resources\app.asar.unpacked\node_modules\tsx\dist\cli.mjs"
-          $boot = Join-Path $root "release\win-unpacked\resources\app.asar\server\bootstrap.ts"
-          $cwd  = Join-Path $root "release\win-unpacked\resources\app.asar.unpacked"
-          # The bootstrap path lives inside app.asar (not a real directory);
-          # Test-Path doesn't see it — skip and let Electron's asar shim read it.
-          foreach ($p in @($exe, $tsx, $cwd)) {
-            if (-not (Test-Path $p)) { Write-Error "[smoke] missing: $p"; exit 1 }
+          if (-not (Test-Path $exe)) { Write-Error "[smoke] missing: $exe"; exit 1 }
+          $logDir = Join-Path $env:USERPROFILE ".ugly-studio\logs"
+          # Start clean so we only ever read lines this launch appends.
+          if (Test-Path $logDir) {
+            Remove-Item "$logDir\electron-*.log" -Force -ErrorAction SilentlyContinue
           }
-          $env:ELECTRON_RUN_AS_NODE = "1"
-          $env:PORT = "0"
-          $logFile = [IO.Path]::GetTempFileName()
-          $proc = Start-Process -FilePath $exe -ArgumentList @($tsx, $boot) `
-                                -WorkingDirectory $cwd `
-                                -RedirectStandardOutput $logFile `
-                                -RedirectStandardError "$logFile.err" `
-                                -NoNewWindow -PassThru
+          function Read-AppLog {
+            if (-not (Test-Path $logDir)) { return "" }
+            $f = Get-ChildItem "$logDir\electron-*.log" -ErrorAction SilentlyContinue |
+                   Sort-Object LastWriteTime -Descending | Select-Object -First 1
+            if ($f) { return (Get-Content $f.FullName -Raw -ErrorAction SilentlyContinue) }
+            return ""
+          }
+          $proc = Start-Process -FilePath $exe -ArgumentList @("--background") -PassThru
           $deadline = (Get-Date).AddSeconds(90)
-          $ok = $false
-          $fail = $false
+          $ok = $false; $fail = $false
           while ((Get-Date) -lt $deadline) {
             Start-Sleep -Milliseconds 500
-            $out = (Get-Content $logFile -ErrorAction SilentlyContinue) -join "`n"
-            $err = (Get-Content "$logFile.err" -ErrorAction SilentlyContinue) -join "`n"
-            $combined = "$out`n$err"
-            if ($combined -match "MODULE_NOT_FOUND|ERR_MODULE_NOT_FOUND|Cannot find module|Cannot find package|Transform failed|does not provide an export") {
+            $log = Read-AppLog
+            if ($log -match "MODULE_NOT_FOUND|ERR_MODULE_NOT_FOUND|Cannot find module|Cannot find package|Transform failed|does not provide an export|Failed to start:") {
               $fail = $true; break
             }
-            if ($combined -match "Server running") { $ok = $true; break }
+            if ($log -match "window\.ugly daemon registered") { $ok = $true; break }
             if ($proc.HasExited -and -not $ok) { $fail = $true; break }
           }
           if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue }
-          $stdout = Get-Content $logFile -Raw -ErrorAction SilentlyContinue
-          $stderr = Get-Content "$logFile.err" -Raw -ErrorAction SilentlyContinue
-          Write-Host "=== stdout (last 40 lines) ==="
-          if ($stdout) { ($stdout -split "`n") | Select-Object -Last 40 | ForEach-Object { Write-Host $_ } }
-          Write-Host "=== stderr (last 40 lines) ==="
-          if ($stderr) { ($stderr -split "`n") | Select-Object -Last 40 | ForEach-Object { Write-Host $_ } }
+          Get-Process "Ugly Studio" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+          Write-Host "=== app log (last 40 lines) ==="
+          $log = Read-AppLog
+          if ($log) { ($log -split "`n") | Select-Object -Last 40 | ForEach-Object { Write-Host $_ } }
           if ($fail -or -not $ok) {
-            Write-Error "[smoke] FAIL — sidecar did not reach 'Server running' (server.start)"
+            Write-Error "[smoke] FAIL — did not reach 'window.ugly daemon registered'"
             exit 1
           }
-          Write-Host "[smoke] OK — sidecar reached 'Server running'"
+          Write-Host "[smoke] OK — reached 'window.ugly daemon registered'"
 
       - name: Smoke test packaged bash tools
         if: inputs.skip_validation != 'true'
@@ -169,96 +165,15 @@ jobs:
         # platform-supported tool through a sealed bash session and
         # asserts the spec version string appears in stdout. Also runs
         # `ugly-studio --help`, `pwd`, and `ls /c` to prove the sealed
-        # shell + CLI entry both bootstrap. Catches Windows-specific
-        # regressions the sidecar smoke can't see: MSYS2 bash.exe path
+        # shell + CLI entry both bootstrap. This is also our cross-platform
+        # module-resolution guard: it loads the app's bundled TS from the
+        # asar via tsx under the packaged Electron, catching Windows-specific
+        # regressions the launch smoke can't see — MSYS2 bash.exe path
         # resolution, MAGICK_HOME injection, .exe suffix handling, and
         # win32-arm64 → x64 fallbacks for uv/python.
         shell: pwsh
         working-directory: source
         run: pnpm exec tsx scripts/smoke-packaged-bash-tools.ts
-
-      - name: Smoke test bundled binaries (npx + python + indexer race)
-        if: inputs.skip_validation != 'true'
-        # Drives the sidecar through the two regression-prone paths the
-        # config.load smoke can't reach:
-        #   1. `spawn npx ENOENT` on Windows (initProject) — verified by
-        #      [smoke:npx ok] from a `bash -c "npx --version"` via the
-        #      bundled PortableGit bash + bundled Node.
-        #   2. indexer.pythonDetect race (ensureIndexStarted fires from
-        #      the rehydration path before binaries.ensure finishes) —
-        #      we pre-seed `~/.ugly-studio/current-project.json` so the
-        #      bootstrap rehydration triggers the race naturally, then
-        #      assert `indexer.pythonDetect fail` is absent in the log.
-        # The sidecar runs `studio/server/smokeSelfTest.ts` when
-        # UGLY_STUDIO_SMOKE=1 and exits non-zero on probe failure.
-        # First-run cost: ~5min for the python download; we allow 10min.
-        shell: pwsh
-        working-directory: source
-        run: |
-          $root = (Get-Location).Path
-          $exe  = Join-Path $root "release\win-unpacked\Ugly Studio.exe"
-          $tsx  = Join-Path $root "release\win-unpacked\resources\app.asar.unpacked\node_modules\tsx\dist\cli.mjs"
-          $boot = Join-Path $root "release\win-unpacked\resources\app.asar\server\bootstrap.ts"
-          $cwd  = Join-Path $root "release\win-unpacked\resources\app.asar.unpacked"
-
-          # Seed the rehydration marker. `loadCurrentProjectSync()` does
-          # `statSync(marker.path)` and drops the marker if the dir is
-          # gone, so the path has to exist at launch.
-          $markerDir = Join-Path $env:USERPROFILE ".ugly-studio"
-          New-Item -ItemType Directory -Force -Path $markerDir | Out-Null
-          $projDir = Join-Path $env:TEMP ("ugly-studio-smoke-" + [System.Guid]::NewGuid().ToString("N"))
-          New-Item -ItemType Directory -Force -Path $projDir | Out-Null
-          $marker = @{ path = $projDir } | ConvertTo-Json -Compress
-          Set-Content -Path (Join-Path $markerDir "current-project.json") -Value $marker -NoNewline -Encoding utf8
-          Write-Host "[smoke-bin] seeded current-project marker → $projDir"
-
-          $env:ELECTRON_RUN_AS_NODE = "1"
-          $env:PORT = "0"
-          $env:UGLY_STUDIO_SMOKE = "1"
-          $logFile = [IO.Path]::GetTempFileName()
-          $proc = Start-Process -FilePath $exe -ArgumentList @($tsx, $boot) `
-                                -WorkingDirectory $cwd `
-                                -RedirectStandardOutput $logFile `
-                                -RedirectStandardError "$logFile.err" `
-                                -NoNewWindow -PassThru
-
-          # Self-test calls process.exit() after both probes — wait for
-          # natural exit, hard-cap at 10min so a hung sidecar can't pin
-          # the runner.
-          $deadline = (Get-Date).AddMinutes(10)
-          while ((Get-Date) -lt $deadline -and -not $proc.HasExited) {
-            Start-Sleep -Seconds 5
-          }
-          $timedOut = $false
-          if (-not $proc.HasExited) {
-            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
-            $timedOut = $true
-          }
-
-          $exitCode = if ($timedOut) { -1 } else { $proc.ExitCode }
-          $stdout = Get-Content $logFile -Raw -ErrorAction SilentlyContinue
-          $stderr = Get-Content "$logFile.err" -Raw -ErrorAction SilentlyContinue
-          $combined = "$stdout`n$stderr"
-          Write-Host "=== sidecar stdout (last 200 lines) ==="
-          if ($stdout) { ($stdout -split "`n") | Select-Object -Last 200 | ForEach-Object { Write-Host $_ } }
-          Write-Host "=== sidecar stderr (last 80 lines) ==="
-          if ($stderr) { ($stderr -split "`n") | Select-Object -Last 80 | ForEach-Object { Write-Host $_ } }
-          if ($timedOut) {
-            Write-Host "::error::[smoke-bin] FAIL — sidecar did not exit within 10 min"
-            exit 1
-          }
-
-          $npxOk    = $combined -match "\[smoke:npx ok\]"
-          $pythonOk = $combined -match "\[smoke:python ok\]"
-          $raceOk   = $combined -match "\[smoke:race ok\]"
-
-          $bad = $false
-          if (-not $npxOk)    { Write-Host "::error::[smoke-bin] bundled npx probe did not pass"; $bad = $true }
-          if (-not $pythonOk) { Write-Host "::error::[smoke-bin] bundled python probe did not pass"; $bad = $true }
-          if (-not $raceOk)   { Write-Host "::error::[smoke-bin] indexer race probe did not pass — readiness-gate regression?"; $bad = $true }
-          if ($exitCode -ne 0) { Write-Host "::error::[smoke-bin] sidecar exited with code $exitCode"; $bad = $true }
-          if ($bad) { exit 1 }
-          Write-Host "[smoke-bin] OK — npx + python + indexer-race probes all passed"
 
       - name: Create GitHub Release with installer
         # Tag = win-v<version>. If a release already exists (re-run), the
